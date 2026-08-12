@@ -6,6 +6,8 @@
 
 Este problema venía arrastrándose desde hace años cuando llegó a mis manos, y en vez de tratarlo como una tarea aislada de captura de datos, lo abordé como un problema de sistema completo, diseñando un protocolo de trabajo y automatizando parte del proceso con una herramienta propia. Este kiosco es la pieza que conecta ese trabajo de análisis, automatización e integración con el cliente final, la parte que la gente ve y usa todos los días. Cada vez que lo veo funcionando siento que valió la pena tomármelo en serio, sin que nadie me lo pidiera exactamente así.
 
+El nombre "Proyecto Nairobi", presente en el código de este kiosco y en mi otro repositorio del Kardex, es una dedicatoria a mi hija. Llevan el mismo nombre porque, aunque son programas distintos, este script aprovecha los datos de esa anterior integración, agrupando ambos trabajos bajo la misma iniciativa personal.
+
 ## El problema
 
 El negocio funciona bajo un modelo de autoservicio, el cliente recorre el punto de venta, toma los productos por su cuenta y paga al final en caja. Ese modelo nunca vino acompañado de una forma de que el cliente mismo consultara un precio, y con los años el catálogo terminó con productos sin código de barras o con códigos mal cargados en el sistema. Corregir eso producto por producto no es algo que una sola persona resuelva de un día para otro, así que hacía falta algo que funcionara ya, con el catálogo incompleto, en vez de esperar a que estuviera perfecto para empezar a dar valor.
@@ -18,7 +20,7 @@ Corre desde un navegador común, sin instalar módulos adicionales de Odoo ni de
 
 ## Cómo funciona
 
-El servidor corre en Flask sobre Waitress en un equipo central de la tienda y se conecta a Odoo por XML-RPC, consultando el producto por su código de barras en el instante en que se escanea. Cada terminal es simplemente un computador con un lector de código de barras conectado y Microsoft Edge abierto en modo kiosko de pantalla completa, apuntando a ese servidor, así que varios puntos de la tienda comparten el mismo catálogo sin tener cada uno su propia copia de los datos.
+El servidor corre en Flask sobre Waitress en un equipo central de la tienda y se conecta a Odoo por XML-RPC, consultando el producto por su código de barras en el instante en que se escanea. Cada terminal es simplemente un computador con un lector de código de barras conectado y Microsoft Edge abierto en modo kiosko de pantalla completa, apuntando a ese servidor, así que sumar una terminal nueva en cualquier punto de la tienda es tan simple como apuntar otro equipo a esa misma dirección, sin instalar nada adicional ni duplicar configuración.
 
 El modo kiosko de Edge no se cierra con un simple Alt+F4, así que cada terminal corre también un agente pequeño en Python que escucha únicamente en su propia máquina y se activa tocando el logo cinco veces seguidas en la pantalla, cerrando Edge solo en ese equipo. De esa forma la salida del kiosko no depende del servidor central ni afecta a las demás terminales cuando alguien necesita volver a Windows.
 
