@@ -14,7 +14,7 @@ El negocio funciona bajo un modelo de autoservicio, el cliente recorre el punto 
 
 ## La solución
 
-El kiosco deja que cualquier cliente pase el código de barras de un producto y vea de inmediato su nombre, precio e imagen, sin depender de que un empleado esté disponible en ese momento. Cuando el código no está en el sistema, en vez de fallar en silencio o mostrar un error, redirige al cliente a una caja con un mensaje pensado para que la experiencia no se sienta como una falla. Eso no completa el catálogo de un momento a otro, pero convierte cada intento fallido en una señal visible de qué producto sigue sin código, y esa presión termina donde debe terminar, en quien es responsable de mantener esos datos, no en el cliente que solo quería saber un precio.
+El kiosco deja que cualquier cliente pase el código de barras de un producto y vea de inmediato su nombre, precio e imagen, sin depender de que un empleado esté disponible en ese momento. Cuando el producto todavía no tiene código cargado, en vez de mostrarlo como una pantalla de error, el sistema redirige al cliente a una caja puntual con un mensaje pensado para sonar a ayuda. Eso no completa el catálogo de un momento a otro, pero evita que la experiencia del cliente dependa de que el catálogo esté perfecto para empezar a dar valor.
 
 Corre desde un navegador común, sin instalar módulos adicionales de Odoo ni depender de licencias extra, así que funciona bien incluso en equipos limitados y aprovecha lo que ya estaba instalado en el punto de venta. Construirlo por fuera también dio control total sobre lo que ve el cliente, desde el tamaño de la letra hasta el mensaje que aparece cuando un producto todavía no tiene código, algo que una app genérica no iba a dejar ajustar así.
 
