@@ -18,7 +18,7 @@ Para materializar una solución inmediata sin depender de presupuestos extra res
 
 El kiosco deja que cualquier cliente pase el código de barras de un producto y vea de inmediato su nombre el precio y la imagen sin depender de que un empleado esté disponible. Cuando el producto todavía no tiene código cargado el sistema redirige al cliente a una caja puntual con un mensaje pensado para sonar a ayuda evitando que la experiencia del cliente dependa de que el inventario esté perfecto. 
 
-El programa corre desde un navegador común sin instalar módulos extra de Odoo ni depender de licencias adicionales por lo que funciona impecable en este hardware reciclado de recursos limitados. Construirlo por fuera dio control total sobre la interfaz desde el tamaño de la letra hasta la gestión de errores logrando resultados que una aplicación genérica nunca permite.
+El programa corre desde un navegador común sin instalar módulos extra de Odoo ni depender de licencias adicionales, funcionando de forma estable incluso en hardware reciclado de bajas prestaciones. Construirlo por fuera dio control total sobre la interfaz desde el tamaño de la letra hasta la gestión de errores logrando resultados que una aplicación genérica nunca permite.
 
 ## Cómo funciona
 
@@ -27,6 +27,8 @@ El servidor corre en Flask sobre Waitress en un equipo central de la tienda y se
 Cada terminal es simplemente un computador reutilizado con un lector de código de barras conectado y Microsoft Edge abierto en modo kiosko de pantalla completa apuntando a ese servidor. Sumar una terminal nueva en cualquier punto de la tienda es tan simple como apuntar otro equipo a esa misma dirección sin instalar nada adicional en Odoo ni duplicar la configuración.
 
 Como el modo kiosko de Edge no se cierra con un simple comando de teclado cada terminal corre también un agente pequeño en Python que escucha únicamente en su propia máquina. Este programa se activa tocando el logo cinco veces seguidas en la pantalla cerrando el navegador solo en ese equipo para que la salida del kiosko no dependa del servidor central ni afecte a las demás terminales cuando alguien necesita volver al entorno de Windows para mantenimiento.
+
+El servidor reutiliza una sola sesión autenticada contra Odoo en vez de abrir una nueva en cada consulta, protegida con un candado para que varias terminales escaneando al mismo tiempo no interfieran entre sí, y cada llamada tiene un límite de tiempo para que una respuesta lenta de Odoo no deje sin servicio al resto de terminales. Cada código escaneado queda registrado con su resultado, lo que en el futuro permitirá priorizar qué productos completar primero en el catálogo en vez de depender de que alguien lo note por casualidad.
 
 ## Herramientas usadas
 
