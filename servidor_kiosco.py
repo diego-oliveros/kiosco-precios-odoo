@@ -1,28 +1,94 @@
 # =============================================================================
-# KIOSCO DE PRECIOS - PROYECTO NAIROBI
+# KIOSCO DE PRECIOS - PROYECTO NAIROBI (Kiosko Anyeli)
 # =============================================================================
 
 import base64
 import random
+import threading
 import xmlrpc.client
+from datetime import datetime
+from urllib.parse import urlparse
 from flask import Flask, Response, jsonify
 from waitress import serve
-from credenciales import URL_ODOO, BASE_DATOS, USUARIO, CLAVE_API
+from kardex_credenciales import URL_ODOO, BASE_DATOS, USUARIO, CLAVE_API
 
 app = Flask(__name__)
 
 
 # --- 1. CONEXIÓN A ODOO ---
+# authenticate() no entrega un token de sesión que expire por sí solo: Odoo
+# vuelve a validar usuario y api key en cada execute_kw, así que autenticar
+# en cada escaneo era un viaje de red completo (y una consulta más contra
+# Odoo) que no aportaba nada. Se autentica una sola vez y se reutiliza el
+# mismo uid mientras siga siendo válido; el candado solo entra en juego al
+# (re)autenticar, nunca durante una consulta normal, para no serializar los
+# escaneos de las demás terminales entre sí.
+#
+# Las llamadas por defecto no tienen límite de tiempo: si Odoo se queda
+# pegado a mitad de una respuesta, el hilo de Waitress que la atendió se
+# queda esperando para siempre. Con solo 10 hilos, unas pocas consultas así
+# bastan para dejar sin servicio a las demás terminales. El transporte de
+# abajo le pone un límite: pasado ese tiempo la llamada falla, cae en el
+# mismo manejo de errores que ya existe, y el hilo queda libre de inmediato.
+TIMEOUT_ODOO_SEGUNDOS = 8
+
+
+class _TransporteConTimeout(xmlrpc.client.Transport):
+    def make_connection(self, host):
+        conexion = super().make_connection(host)
+        conexion.timeout = TIMEOUT_ODOO_SEGUNDOS
+        return conexion
+
+
+class _TransporteSeguroConTimeout(xmlrpc.client.SafeTransport):
+    def make_connection(self, host):
+        conexion = super().make_connection(host)
+        conexion.timeout = TIMEOUT_ODOO_SEGUNDOS
+        return conexion
+
+
+def _nuevo_transporte():
+    es_https = urlparse(URL_ODOO).scheme == 'https'
+    return _TransporteSeguroConTimeout() if es_https else _TransporteConTimeout()
+
+
+_odoo_lock = threading.Lock()
+_odoo_uid = None
+
+
+def invalidar_conexion_odoo():
+    global _odoo_uid
+    with _odoo_lock:
+        _odoo_uid = None
+
+
 def get_odoo_connection():
-    try:
-        common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(URL_ODOO))
-        uid = common.authenticate(BASE_DATOS, USUARIO, CLAVE_API, {})
-        if uid:
-            models = xmlrpc.client.ServerProxy('{}/xmlrpc/2/object'.format(URL_ODOO))
-            return uid, models
-    except Exception as e:
-        print(f"Error de conexión a Odoo: {e}")
-    return None, None
+    # Solo el uid se cachea, no el proxy de "models". Un ServerProxy guarda
+    # internamente una única conexión HTTP y la reutiliza entre llamadas
+    # (keep-alive); si ese mismo proxy se compartiera entre los 10 hilos de
+    # Waitress, dos terminales escaneando casi al mismo tiempo terminarían
+    # usando el mismo socket a la vez, con el riesgo de mezclar sus
+    # respuestas. Crear el ServerProxy es solo construir el objeto en
+    # memoria (no abre conexión ni viaja a Odoo hasta la primera llamada),
+    # así que armarlo de nuevo en cada petición no cuesta lo que sí cuesta
+    # authenticate(), que es lo único que de verdad vale la pena reutilizar.
+    global _odoo_uid
+    if _odoo_uid is None:
+        with _odoo_lock:
+            if _odoo_uid is None:  # otra terminal ya autenticó mientras esta esperaba el candado
+                try:
+                    common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(URL_ODOO), transport=_nuevo_transporte())
+                    uid = common.authenticate(BASE_DATOS, USUARIO, CLAVE_API, {})
+                    if uid:
+                        _odoo_uid = uid
+                except Exception as e:
+                    print(f"Error de conexión a Odoo: {e}")
+
+    if _odoo_uid is None:
+        return None, None
+
+    models = xmlrpc.client.ServerProxy('{}/xmlrpc/2/object'.format(URL_ODOO), transport=_nuevo_transporte())
+    return _odoo_uid, models
 
 
 # --- 2. UTILIDAD: detectar el mime real de la imagen que entrega Odoo ---
@@ -70,8 +136,13 @@ HTML_TEMPLATE = """
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800;900&family=Barlow:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 
-  /* Concepto visual: tarjeta de estante colgada en un muro oscuro de
-     bodega. Riel superior amarillo/negro sin aludir a cinta de peligro. */
+  /* =====================================================================
+     TOKENS DE DISEÑO
+     Concepto: la pantalla es una gran "tarjeta de estante" (hang-tag) de
+     ferretería, colgada sobre el muro oscuro del taller. El riel superior
+     amarillo/negro evita alusión directa a cinta de peligro y franjas
+     de góndola. El robot Kardex vive discreto en el pie de página.
+  ===================================================================== */
   :root{
     --carbon-950:#131316;
     --carbon-850:#1d1d21;
@@ -93,7 +164,9 @@ HTML_TEMPLATE = """
     --f-texto:'Barlow', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --f-mono:'JetBrains Mono', 'Consolas', monospace;
 
-    /* pantalla fija de un solo kiosko, no responsive genérico */
+    /* Techo subido a propósito: esta pantalla vive en UN solo monitor de
+       kiosko fijo, no es responsive genérico, así que puede ocupar mucho
+       más espacio del que un sitio web normal se permitiría. */
     font-size: clamp(17px, 2.5vmin + 0.4vw, 27px);
   }
 
@@ -118,13 +191,6 @@ HTML_TEMPLATE = """
       animation-duration:.001ms !important;
       animation-iteration-count:1 !important;
       transition-duration:.001ms !important;
-    }
-    /* el láser es funcional, no decorativo, se mantiene aunque el SO pida
-       movimiento reducido */
-    .codigo-svg .laser{
-      animation-duration:2.6s !important;
-      animation-iteration-count:infinite !important;
-      transition-duration:initial !important;
     }
   }
 
@@ -320,6 +386,47 @@ HTML_TEMPLATE = """
   }
   .nf__caja b{ color:var(--amber-600); font-weight:700; }
 
+  /* --------- ESTADO 4: BUSCANDO ---------
+     Aparece apenas el lector envía el código, mientras se espera la
+     respuesta real de Odoo — nunca se alarga artificialmente ese tiempo,
+     solo se cubre el hueco silencioso que hoy existe. El texto confirma
+     que el pitido del lector sí registró el código: antes, en ese mismo
+     hueco, la pantalla de espera seguía igual unos segundos y varios
+     clientes creían que el lector no había funcionado. El punto ámbar que
+     orbita el logo reutiliza el mismo color del láser de escaneo para que
+     se sienta parte de la misma familia visual y no un elemento pegado. */
+  .buscando__orbit{
+    position:relative;
+    width:clamp(200px,34vmin,380px);
+    height:clamp(200px,34vmin,380px);
+  }
+  .buscando__logo{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    border-radius:50%;
+    object-fit:contain;
+    box-shadow:0 8px 18px -10px rgba(16,16,20,.35);
+  }
+  .buscando__anillo{
+    position:absolute; inset:-4%;
+    border-radius:50%;
+    animation:orbitar 1.7s linear infinite;
+  }
+  .buscando__anillo::before{
+    content:"";
+    position:absolute;
+    top:0; left:50%;
+    width:clamp(14px,2.6vmin,22px); height:clamp(14px,2.6vmin,22px);
+    margin-left:calc(clamp(14px,2.6vmin,22px) / -2);
+    border-radius:50%;
+    background:var(--amber-600);
+    box-shadow:0 0 8px rgba(232,89,12,.85), 0 0 18px rgba(232,89,12,.5);
+  }
+  @keyframes orbitar{
+    from{ transform:rotate(0deg); }
+    to{ transform:rotate(360deg); }
+  }
+
   /* ------------------------------ PIE ---------------------------------- */
   .pie{
     flex:none; z-index:1;
@@ -381,8 +488,18 @@ HTML_TEMPLATE = """
             <rect x="89" y="6" width="3" height="48"/>
             <line class="laser" x1="0" y1="6" x2="100" y2="6"/>
           </svg>
-          <div class="espera__titulo">Pase el código de barras del producto por el lector</div>
+          <div class="espera__titulo">¡Hola! Acerca el código de barras y descubre el precio</div>
           <div class="espera__sub" id="espera-sub">Sincronizando catálogo con bodega…</div>
+        </div>
+
+        <!-- ESTADO 4: BUSCANDO (cubre el hueco entre el pitido del lector y la respuesta de Odoo) -->
+        <div class="pantalla" id="pantalla-buscando">
+          <div class="buscando__orbit">
+            <img class="buscando__logo" src="/static/img/espera.png" alt="Buscando" draggable="false">
+            <div class="buscando__anillo"></div>
+          </div>
+          <div class="espera__titulo">¡Un momento, ya te traemos tu precio!</div>
+          <div class="espera__sub" id="buscando-sub">Buscando tu producto…</div>
         </div>
 
         <!-- ESTADO 2: ÉXITO -->
@@ -429,26 +546,44 @@ HTML_TEMPLATE = """
     LIMITE_INACTIVIDAD_MS: 6 * 60 * 60 * 1000,   // recarga suave tras 6h sin escaneos
     INTERVALO_CHEQUEO_INACTIVIDAD_MS: 60 * 1000,
     ROTACION_FRASES_MS: 3000,
+    ROTACION_FRASES_BUSCANDO_MS: 1300, // más lento que el primer intento (900ms se sentía apurado)
+    MINIMO_VISIBLE_BUSCANDO_MS: 500, // evita que la transición se vea cortada en respuestas muy rápidas
     DEBOUNCE_MISMO_CODIGO_MS: 800,
     CAJAS_DISPONIBLES: [1, 2, 3, 4, 7, 9],
     PUERTO_AGENTE_LOCAL: 55556, // debe coincidir con kiosco_agente_local.py de ESTE equipo
   };
 
   const FRASES_ESPERA = [
-    "Escanee el código de barras del producto…",
+    "Acércalo al lector y no lo muevas…",
     "Seguimos ampliando nuestro catálogo cada semana…",
     "Actualizando precios en tiempo real…",
     "¿No encuentras tu producto? Con gusto te ayudamos en caja…",
     "Gracias por tu visita…",
   ];
 
+  // "Gracias por tu paciencia" y "un segundo más" se sacaron a propósito:
+  // sonaban a disculpa por una demora, y si el cliente iba a consultar un
+  // segundo producto después, esa misma frase le hacía anticipar que
+  // también se iba a demorar. Mejor que ninguna frase hable del tiempo que
+  // toma la consulta.
+  const FRASES_BUSCANDO = [
+    "Ahorra comprando con nosotros…",
+    "Buscando el mejor precio para ti…",
+    "Aquí cuidamos tu bolsillo…",
+    "Gracias por visitarnos…",
+    "Calidad y buen precio, siempre…",
+  ];
+
   // ============================== ELEMENTOS =================================
   const pantallas = {
     espera: document.getElementById('pantalla-espera'),
+    buscando: document.getElementById('pantalla-buscando'),
     exito: document.getElementById('pantalla-exito'),
     nf: document.getElementById('pantalla-nf'),
   };
   const esperaSub = document.getElementById('espera-sub');
+  const buscandoSub = document.getElementById('buscando-sub');
+  const buscandoAnillo = document.querySelector('.buscando__anillo');
   const laserSvg = document.querySelector('.codigo-svg .laser');
   const toast = document.getElementById('toast');
   const logoTap = document.getElementById('logo-tap');
@@ -460,6 +595,9 @@ HTML_TEMPLATE = """
   let ultimaActividad = Date.now();
   let ultimoCodigo = '';
   let ultimoCodigoTs = 0;
+  let idConsultaActual = 0; // se incrementa en cada escaneo; permite ignorar respuestas de un escaneo ya superado por otro más nuevo
+  let secuenciaBuscando = FRASES_BUSCANDO;
+  let posSecuenciaBuscando = 0;
 
   // ============================ MÁQUINA DE ESTADOS ===========================
   function mostrarEstado(nombre){
@@ -467,13 +605,38 @@ HTML_TEMPLATE = """
     Object.entries(pantallas).forEach(([key, el]) => {
       el.classList.toggle('activa', key === nombre);
     });
-    // el láser se congela si la pantalla estuvo oculta, se relanza al volver
+    // El navegador a veces "congela" la animación CSS del láser mientras la
+    // pantalla de espera estuvo oculta (visibility:hidden) durante un
+    // escaneo; forzamos su reinicio cada vez que se vuelve a mostrar, igual
+    // que ya se hacía con la animación del precio.
     if(nombre === 'espera' && laserSvg) reiniciarAnimacion(laserSvg);
+
+    if(nombre === 'buscando'){
+      if(buscandoAnillo) reiniciarAnimacion(buscandoAnillo);
+      secuenciaBuscando = barajarFrases(FRASES_BUSCANDO);
+      posSecuenciaBuscando = 0;
+      buscandoSub.textContent = secuenciaBuscando[0];
+      buscandoSub.style.opacity = 1;
+    }
   }
 
   function volverAEspera(){
     clearTimeout(timerRetorno);
     mostrarEstado('espera');
+  }
+
+  // El orden de las frases se sortea una sola vez por consulta (no en cada
+  // cambio de frase): se baraja al entrar a "buscando" y esa misma secuencia
+  // se repite en bucle mientras esa consulta esté en pantalla. La próxima
+  // consulta vuelve a barajar, así que el orden cambia de una consulta a
+  // otra pero no a la mitad de una.
+  function barajarFrases(lista){
+    const copia = lista.slice();
+    for(let i = copia.length - 1; i > 0; i--){
+      const j = Math.floor(Math.random() * (i + 1));
+      [copia[i], copia[j]] = [copia[j], copia[i]];
+    }
+    return copia;
   }
 
   function reproducir(audioEl){
@@ -500,10 +663,28 @@ HTML_TEMPLATE = """
     ultimaActividad = ahora;
 
     clearTimeout(timerRetorno);
+    mostrarEstado('buscando'); // cubre el hueco entre el pitido del lector y la respuesta real de Odoo
+    const inicioBusqueda = Date.now();
+    const miIdConsulta = ++idConsultaActual;
+
+    // Solo espera lo que falte para completar el mínimo visible (si es que falta
+    // algo); si Odoo ya se demoró más que eso, se muestra el resultado de inmediato.
+    // Justo antes de pintar se revisa si esta sigue siendo la consulta más reciente:
+    // si el cliente ya escaneó otro producto mientras esta seguía en camino, la
+    // respuesta de esta (así llegue después) se descarta en silencio en vez de
+    // sobrescribir lo que ya se muestra en pantalla.
+    function mostrarResultado(fn){
+      const faltante = CONFIG.MINIMO_VISIBLE_BUSCANDO_MS - (Date.now() - inicioBusqueda);
+      function intentarPintar(){
+        if(miIdConsulta !== idConsultaActual) return;
+        fn();
+      }
+      if(faltante > 0){ setTimeout(intentarPintar, faltante); } else { intentarPintar(); }
+    }
 
     fetch('/api/precio/' + encodeURIComponent(codigo))
       .then(r => r.json())
-      .then(data => {
+      .then(data => mostrarResultado(() => {
         if(data.encontrado){
           document.getElementById('exito-nombre').textContent = data.nombre;
           document.getElementById('exito-precio').textContent =
@@ -531,15 +712,15 @@ HTML_TEMPLATE = """
           reproducir(sndNf);
           timerRetorno = setTimeout(volverAEspera, CONFIG.TIEMPO_RETORNO_NF_MS);
         }
-      })
-      .catch(() => {
+      }))
+      .catch(() => mostrarResultado(() => {
         // problema de conexión: se informa brevemente y se reintenta con recarga suave
         document.getElementById('exito-nombre').textContent = 'Problema de conexión temporal';
         document.getElementById('exito-precio').textContent = '';
         document.getElementById('exito-imagen-caja').classList.add('sin-imagen');
         mostrarEstado('exito');
         setTimeout(() => location.reload(), 3000);
-      });
+      }));
   }
 
   // ========================== LECTOR DE CÓDIGO DE BARRAS ======================
@@ -547,6 +728,14 @@ HTML_TEMPLATE = """
   let bufferTimeout;
 
   document.addEventListener('keydown', function(e){
+
+    // --- No aparecen letreros ---
+    if (e.key === 'F12' || e.ctrlKey || e.altKey || e.metaKey) {
+        e.preventDefault();
+        return;
+    }
+    // ----------------------------
+
     intentarPantallaCompleta(); // el primer evento de teclado real habilita el gesto
 
     if(e.key === 'Enter'){
@@ -647,6 +836,19 @@ HTML_TEMPLATE = """
     }, 400);
   }, CONFIG.ROTACION_FRASES_MS);
 
+  // ========================= FRASE RÁPIDA DE BÚSQUEDA ==========================
+  // Rotación más veloz que la de espera: el objetivo es transmitir actividad
+  // durante una consulta que normalmente dura poco (no llenar tiempo muerto).
+  setInterval(() => {
+    if(estadoActual !== 'buscando') return;
+    buscandoSub.style.opacity = 0;
+    setTimeout(() => {
+      posSecuenciaBuscando = (posSecuenciaBuscando + 1) % secuenciaBuscando.length;
+      buscandoSub.textContent = secuenciaBuscando[posSecuenciaBuscando];
+      buscandoSub.style.opacity = 1;
+    }, 200);
+  }, CONFIG.ROTACION_FRASES_BUSCANDO_MS);
+
 })();
 </script>
 </body>
@@ -665,26 +867,42 @@ def index():
 
 @app.route('/api/precio/<codigo>')
 def obtener_precio(codigo):
+    hora = datetime.now().strftime('%H:%M:%S')
     uid, models = get_odoo_connection()
     if not uid:
+        print(f"[{hora}] {codigo} -> SIN CONEXIÓN A ODOO")
         return jsonify({"encontrado": False})
 
-    try:
-        productos = models.execute_kw(BASE_DATOS, uid, CLAVE_API,
-            'product.product', 'search_read',
-            [[['barcode', '=', codigo]]],
-            {'fields': ['name', 'public_price_amount', 'image_512'], 'limit': 1}
-        )
-        if productos:
-            return jsonify({
-                "encontrado": True,
-                "nombre": productos[0].get('name', 'Sin nombre'),
-                "precio": productos[0].get('public_price_amount', 0.0),
-                "imagen": _armar_data_uri(productos[0].get('image_512')),
-            })
-    except Exception:
-        pass
+    for intento in (1, 2):
+        try:
+            productos = models.execute_kw(BASE_DATOS, uid, CLAVE_API,
+                'product.product', 'search_read',
+                [[['barcode', '=', codigo]]],
+                {'fields': ['name', 'public_price_amount', 'image_512'], 'limit': 1}
+            )
+            if productos:
+                print(f"[{hora}] {codigo} -> OK: {productos[0].get('name')} (${productos[0].get('public_price_amount', 0.0)})")
+                return jsonify({
+                    "encontrado": True,
+                    "nombre": productos[0].get('name', 'Sin nombre'),
+                    "precio": productos[0].get('public_price_amount', 0.0),
+                    "imagen": _armar_data_uri(productos[0].get('image_512')),
+                })
+            break
+        except xmlrpc.client.Fault:
+            # el uid cacheado dejó de ser válido (api key rotada, usuario dado
+            # de baja, etc.): se descarta y se autentica una sola vez más
+            if intento == 2:
+                break
+            invalidar_conexion_odoo()
+            uid, models = get_odoo_connection()
+            if not uid:
+                print(f"[{hora}] {codigo} -> SIN CONEXIÓN A ODOO")
+                return jsonify({"encontrado": False})
+        except Exception:
+            break
 
+    print(f"[{hora}] {codigo} -> NO ENCONTRADO")
     return jsonify({"encontrado": False})
 
 
