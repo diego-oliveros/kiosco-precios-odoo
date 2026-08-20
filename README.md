@@ -43,6 +43,7 @@ El servidor reutiliza una sola sesión autenticada contra Odoo en vez de abrir u
 2. Ajusta la IP del servidor en iniciar_kiosco.bat
 3. En el servidor corre servidor_kiosco.py o instálalo como servicio de Windows con NSSM para que arranque solo
 4. En cada terminal usa iniciar_kiosco_silencioso.vbs para abrir el kiosco sin ventanas de consola visibles
+5. Coloca el logo, imagen de espera y favicon dentro de una carpeta `static/img/` junto al servidor, con los nombres `logo.png`, `espera.png` y `favicon.ico`. No se incluyen en este repositorio por pertenecer a la identidad visual de cada negocio.
 
 --
 
